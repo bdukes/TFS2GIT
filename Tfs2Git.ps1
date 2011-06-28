@@ -17,8 +17,18 @@ Param
 	[string]$WorkspaceName = "TFS2GIT",
 	[int]$StartingCommit,
 	[int]$EndingCommit,
-	[string]$UserMappingFile
+	[string]$UserMappingFile,
+    [string]$CommitMessageFormat = "{1}`n`nTFS Changeset ID: {0}`nCommitter: {2}`nDate: {4:G}`nItems:`n{5}`n`nWork Items:`n{6}`n`nCheck-in Notes:`n{7}`n`nPolicy Override: {8}`n{9}", #0=Changeset ID, 1=Comment, 2=Committer, 3=Owner, 4=Creation Date, 5=Changes, 6=Work Items, 7=Checkin Note, 8=Policy Override Comment, 9=Policies Overridden
+    [string]$ChangeFormat = "{0,-10} {1}`n", #0=Change Type, 1=Server Item Path
+    [string]$WorkItemFormat = "{0,-10} {1}`n", #0=Work Item Id, 1=Work Item Title
+    [string]$CheckInNotesFormat = "  {0}: {1}`n", #0=Name, 1=Value
+    [string]$PolicyFailuresFormat = "{0}`n" #0=Policy Name, 1=Comment
 )
+
+if ((Get-PSSnapin -Name 'Microsoft.TeamFoundation.PowerShell' -ErrorAction SilentlyContinue) -eq $null)
+{
+    Add-PsSnapin Microsoft.TeamFoundation.PowerShell
+}
 
 function CheckPath([string]$program) 
 {
@@ -168,32 +178,10 @@ function PrepareWorkspace
 # and use a regular expression to retrieve the individual changeset numbers.
 function GetAllChangesetsFromHistory 
 {
-	$HistoryFileName = "history.txt"
-
-	tf history $TFSRepository /recursive /noprompt /format:brief | Out-File $HistoryFileName
-
-	# Necessary, because Powershell has some 'issues' with current directory. 
-	# See http://huddledmasses.org/powershell-power-user-tips-current-directory/
-	$FileWithCurrentPath =  (Convert-Path (Get-Location -PSProvider FileSystem)) + "\" + $HistoryFileName 
-	
-	$file = [System.IO.File]::OpenText($FileWithCurrentPath)
-	# Skip first two lines 
-	$line = $file.ReadLine()
-	$line = $file.ReadLine()
-
-	while (!$file.EndOfStream)
-	{
-		$line = $file.ReadLine()
-		# Match digits at the start of the line
-		$num = [regex]::Match($line, "^\d+").Value
-		$ChangeSets = $ChangeSets + @([System.Convert]::ToInt32($num))
-	}
-	$file.Close()
-
-	# Sort them from low to high.
-	$ChangeSets = $ChangeSets | Sort-Object			 
-
-	return $ChangeSets
+	$ChangeSets = Get-TfsItemHistory $TFSRepository -Recurse
+    
+    # Sort them from low to high.
+	return $ChangeSets | Sort-Object ChangesetId
 }
 
 # Actual converting takes place here.
@@ -221,18 +209,18 @@ function Convert ([array]$ChangeSets)
 	foreach ($ChangeSet in $ChangeSets)
 	{
 		# Retrieve sources from TFS
-		Write-Host "Retrieving changeset", $ChangeSet
+		Write-Host "Retrieving changeset", $ChangeSet.ChangesetId
 
 		if ($RetrieveAll)
 		{
 			# For the first changeset, we have to get everything.
-			tf get $TemporaryDirectory /force /recursive /noprompt /version:C$ChangeSet | Out-Null
+			tf get $TemporaryDirectory /force /recursive /noprompt /version:C$ChangeSet.ChangesetId | Out-Null
 			$RetrieveAll = $false
 		}
 		else
 		{
 			# Now, only get the changed files.
-			tf get $TemporaryDirectory /recursive /noprompt /version:C$ChangeSet | Out-Null
+			tf get $TemporaryDirectory /recursive /noprompt /version:C$ChangeSet.ChangesetId | Out-Null
 		}
 
 
@@ -241,7 +229,7 @@ function Convert ([array]$ChangeSets)
 		pushd $TemporaryDirectory
 		git add --all | Out-Null
 		$CommitMessageFileName = "commitmessage.txt"
-		GetCommitMessage $ChangeSet $CommitMessageFileName
+		GetCommitMessage $ChangeSet.ChangesetId $CommitMessageFileName
 
 		# We don't want the commit message to be included, so we remove it from the index.
 		# Not from the working directory, because we need it in the commit command.
@@ -270,9 +258,35 @@ function Convert ([array]$ChangeSets)
 }
 
 # Retrieve the commit message for a specific changeset
-function GetCommitMessage ([string]$ChangeSet, [string]$CommitMessageFileName)
+function GetCommitMessage ([int]$ChangesetId, [string]$CommitMessageFileName)
 {	
-	tf changeset $ChangeSet /noprompt | Out-File $CommitMessageFileName -encoding utf8
+    $ChangeSet = Get-TfsChangeset $ChangesetId
+    
+    $Changes = ""
+    foreach ($Change in $ChangeSet.Changes)
+    {
+        $Changes += $ChangeFormat -F $Change.ChangeType, $Change.ServerItem
+    }
+    
+    $WorkItems = ""
+    foreach ($WorkItem in $ChangeSet.WorkItems)
+    {
+        $WorkItems += $WorkItemFormat -F $WorkItem.Id, $WorkItem.Title
+    }
+    
+    $CheckinNote = ""
+    foreach ($NoteField in $ChangeSet.CheckinNote.Values)
+    {
+        $CheckinNote += $CheckInNotesFormat -F $NoteField.Name, $NoteField.Value
+    }
+    
+    $PolicyFailures = ""
+    foreach ($Failure in $ChangeSet.PolicyOverride.PolicyFailures)
+    {
+        $PolicyFailures += $PolicyFailuresFormat -F $Failure.PolicyName, $Failure.Message
+    }
+    
+    $CommitMessageFormat -F $ChangeSet.ChangesetId, $ChangeSet.Comment, $ChangeSet.Committer, $ChangeSet.Owner, $ChangeSet.CreationDate, $Changes, $WorkItems, $CheckinNote, $ChangeSet.PolicyOverride.Comment, $PolicyFailures | Out-File $CommitMessageFileName -encoding utf8
 }
 
 # Clone the repository to the directory where you started the script.
