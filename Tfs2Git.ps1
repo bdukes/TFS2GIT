@@ -13,14 +13,16 @@ Param
 (
 	[Parameter(Mandatory = $True)]
 	[string]$TFSRepository,
+    [Parameter(Mandatory = $True)]
+    [System.Uri]$ServerUri,
 	[string]$GitRepository = "ConvertedFromTFS",
 	[string]$WorkspaceName = "TFS2GIT",
 	[int]$StartingCommit,
 	[int]$EndingCommit,
 	[string]$UserMappingFile,
-    [string]$CommitMessageFormat = "{1}`n`nTFS Changeset ID: {0}`nCommitter: {2}`nDate: {4:G}`nItems:`n{5}`n`nWork Items:`n{6}`n`nCheck-in Notes:`n{7}`n`nPolicy Override: {8}`n{9}", #0=Changeset ID, 1=Comment, 2=Committer, 3=Owner, 4=Creation Date, 5=Changes, 6=Work Items, 7=Checkin Note, 8=Policy Override Comment, 9=Policies Overridden
-    [string]$ChangeFormat = "{0,-10} {1}`n", #0=Change Type, 1=Server Item Path
-    [string]$WorkItemFormat = "{0,-10} {1}`n", #0=Work Item Id, 1=Work Item Title
+    [string]$CommitMessageFormat = "{1}`n`nTFS Changeset ID: {0}`nCommitter: {2} ({3})`nDate: {4:G}`nItems:`n{5}`n`nWork Items:`n{6}`n`nCheck-in Notes:`n{7}`n`nPolicy Override: {8}`n{9}", #0=Changeset ID, 1=Comment, 2=Committer, 3=Owner, 4=Creation Date, 5=Changes, 6=Work Items, 7=Checkin Note, 8=Policy Override Comment, 9=Policies Overridden
+    [string]$ChangeFormat = "{0,-25} {1}`n", #0=Change Type, 1=Server Item Path
+    [string]$WorkItemFormat = "{0,-8} {1}`n", #0=Work Item Id, 1=Work Item Title
     [string]$CheckInNotesFormat = "  {0}: {1}`n", #0=Name, 1=Value
     [string]$PolicyFailuresFormat = "{0}`n" #0=Policy Name, 1=Comment
 )
@@ -79,11 +81,11 @@ function AreSpecifiedCommitsPresent([array]$ChangeSets)
 	[bool]$EndingCommitFound = $false
 	foreach ($ChangeSet in $ChangeSets)
 	{
-		if ($ChangeSet -eq $StartingCommit)
+		if ($ChangeSet.ChangesetId -eq $StartingCommit)
 		{
 			$StartingCommitFound = $true
 		}
-		if ($ChangeSet -eq $EndingCommit)
+		if ($ChangeSet.ChangesetId -eq $EndingCommit)
 		{
 			$EndingCommitFound = $true
 		}
@@ -117,7 +119,7 @@ function GetSpecifiedRangeFromHistory
 
 	foreach ($ChangeSet in $ChangeSets)
 	{
-		if (($ChangeSet -ge $StartingCommit) -and ($ChangeSet -le $EndingCommit))
+		if (($ChangeSet.ChangesetId -ge $StartingCommit) -and ($ChangeSet.ChangesetId -le $EndingCommit))
 		{
 			$FilteredChangeSets = $FilteredChangeSets + $ChangeSet
 		}
@@ -167,10 +169,10 @@ function PrepareWorkspace
 	md $TempDir | Out-null
 
 	# Create the workspace and map it to the temporary directory we just created.
-	tf workspace /delete $WorkspaceName /noprompt
-	tf workspace /new /noprompt /comment:"Temporary workspace for converting a TFS repository to Git" $WorkspaceName
-	tf workfold /unmap /workspace:$WorkspaceName $/
-	tf workfold /map /workspace:$WorkspaceName $TFSRepository $TempDir
+	tf workspace /delete /collection:$ServerUri $WorkspaceName /noprompt
+	tf workspace /new /collection:$ServerUri /noprompt /comment:"Temporary workspace for converting a TFS repository to Git" $WorkspaceName
+	tf workfold /unmap /collection:$ServerUri /workspace:$WorkspaceName $/
+	tf workfold /map /collection:$ServerUri /workspace:$WorkspaceName $TFSRepository $TempDir
 }
 
 
@@ -178,7 +180,7 @@ function PrepareWorkspace
 # and use a regular expression to retrieve the individual changeset numbers.
 function GetAllChangesetsFromHistory 
 {
-	$ChangeSets = Get-TfsItemHistory $TFSRepository -Recurse
+	$ChangeSets = Get-TfsItemHistory $TFSRepository -Recurse -Server $ServerUri
     
     # Sort them from low to high.
 	return $ChangeSets | Sort-Object ChangesetId
@@ -208,19 +210,22 @@ function Convert ([array]$ChangeSets)
 	[bool]$RetrieveAll = $true
 	foreach ($ChangeSet in $ChangeSets)
 	{
+        $ChangesetId = $ChangeSet.ChangesetId
+        $ChangeSet = Get-TfsChangeset $ChangesetId -Server $ServerUri
+        
 		# Retrieve sources from TFS
-		Write-Host "Retrieving changeset", $ChangeSet.ChangesetId
+		Write-Host "Retrieving changeset", $ChangesetId
 
 		if ($RetrieveAll)
 		{
 			# For the first changeset, we have to get everything.
-			tf get $TemporaryDirectory /force /recursive /noprompt /version:C$ChangeSet.ChangesetId | Out-Null
+			tf get $TemporaryDirectory /force /recursive /noprompt /version:C$ChangesetId | Out-Null
 			$RetrieveAll = $false
 		}
 		else
 		{
 			# Now, only get the changed files.
-			tf get $TemporaryDirectory /recursive /noprompt /version:C$ChangeSet.ChangesetId | Out-Null
+			tf get $TemporaryDirectory /recursive /noprompt /version:C$ChangesetId | Out-Null
 		}
 
 
@@ -229,17 +234,16 @@ function Convert ([array]$ChangeSets)
 		pushd $TemporaryDirectory
 		git add --all | Out-Null
 		$CommitMessageFileName = "commitmessage.txt"
-		GetCommitMessage $ChangeSet.ChangesetId $CommitMessageFileName
+		GetCommitMessage $ChangesetId $CommitMessageFileName
 
 		# We don't want the commit message to be included, so we remove it from the index.
 		# Not from the working directory, because we need it in the commit command.
 		git rm $CommitMessageFileName --cached --force		
 
 		$CommitMsg = Get-Content $CommitMessageFileName		
-		$Match = ([regex]'User: (\w+)').Match($commitMsg)
-		if ($UserMapping.Count -gt 0 -and $Match.Success -and $UserMapping.ContainsKey($Match.Groups[1].Value)) 
+		if ($UserMapping.Count -gt 0 -and $UserMapping.ContainsKey($ChangeSet.Committer)) 
 		{	
-			$Author = $userMapping[$Match.Groups[1].Value]
+			$Author = $userMapping[$ChangeSet.Committer]
 			Write-Host "Found user" $Author "in user mapping file."
 			git commit --file $CommitMessageFileName --author $Author | Out-Null									
 		}
@@ -249,7 +253,7 @@ function Convert ([array]$ChangeSets)
 			{
 				$GitUserName = git config user.name
 				$GitUserEmail = git config user.email				
-				Write-Host "Could not find user" $Match.Groups[1].Value "in user mapping file. The default configured user" $GitUserName $GitUserEmail "will be used for this commit."
+				Write-Host "Could not find user" $ChangeSet.Committer "in user mapping file. The default configured user" $GitUserName $GitUserEmail "will be used for this commit."
 			}
 			git commit --file $CommitMessageFileName | Out-Null
 		}
@@ -258,14 +262,12 @@ function Convert ([array]$ChangeSets)
 }
 
 # Retrieve the commit message for a specific changeset
-function GetCommitMessage ([int]$ChangesetId, [string]$CommitMessageFileName)
+function GetCommitMessage ($Changeset, [string]$CommitMessageFileName)
 {	
-    $ChangeSet = Get-TfsChangeset $ChangesetId
-    
     $Changes = ""
     foreach ($Change in $ChangeSet.Changes)
     {
-        $Changes += $ChangeFormat -F $Change.ChangeType, $Change.ServerItem
+        $Changes += $ChangeFormat -F $Change.ChangeType, $Change.Item.ServerItem
     }
     
     $WorkItems = ""
@@ -286,7 +288,17 @@ function GetCommitMessage ([int]$ChangesetId, [string]$CommitMessageFileName)
         $PolicyFailures += $PolicyFailuresFormat -F $Failure.PolicyName, $Failure.Message
     }
     
-    $CommitMessageFormat -F $ChangeSet.ChangesetId, $ChangeSet.Comment, $ChangeSet.Committer, $ChangeSet.Owner, $ChangeSet.CreationDate, $Changes, $WorkItems, $CheckinNote, $ChangeSet.PolicyOverride.Comment, $PolicyFailures | Out-File $CommitMessageFileName -encoding utf8
+    $CommitMessageFormat -F $ChangeSet.ChangesetId, `
+                            $ChangeSet.Comment, `
+                            $ChangeSet.Committer, `
+                            $ChangeSet.Owner, `
+                            $ChangeSet.CreationDate, `
+                            $Changes, `
+                            $WorkItems, `
+                            $CheckinNote, `
+                            $ChangeSet.PolicyOverride.Comment, `
+                            $PolicyFailures `
+                    | Out-File $CommitMessageFileName -encoding utf8
 }
 
 # Clone the repository to the directory where you started the script.
@@ -310,7 +322,7 @@ function CleanUp
 	$TempDir = GetTemporaryDirectory
 
 	Write-Host "Removing workspace from TFS"
-	tf workspace /delete $WorkspaceName /noprompt
+	tf workspace /delete $WorkspaceName /collection:$ServerUri /noprompt
 
 	Write-Host "Removing working directories in" $TempDir
 	Remove-Item -path $TempDir -force -recurse
