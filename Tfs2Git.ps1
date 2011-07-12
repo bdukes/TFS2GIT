@@ -20,7 +20,7 @@ Param
 	[int]$StartingCommit,
 	[int]$EndingCommit,
 	[string]$UserMappingFile,
-    [string]$CommitMessageFormat = "{1}`n`nTFS Changeset ID: {0}`nCommitter: {2} ({3})`nDate: {4:G}`nItems:`n{5}`n`nWork Items:`n{6}`n`nCheck-in Notes:`n{7}`n`nPolicy Override: {8}`n{9}", #0=Changeset ID, 1=Comment, 2=Committer, 3=Owner, 4=Creation Date, 5=Changes, 6=Work Items, 7=Checkin Note, 8=Policy Override Comment, 9=Policies Overridden
+    [string]$CommitMessageFormat = "{1}`n`nTFS Changeset ID: {0}`nUser: {3} ({2})`nDate: {4:G}`nItems:`n{5}`n`nWork Items:`n{6}`n`nCheck-in Notes:`n{7}`n`nPolicy Override: {8}`n{9}", #0=Changeset ID, 1=Comment, 2=Committer, 3=Owner, 4=Creation Date, 5=Changes, 6=Work Items, 7=Checkin Note, 8=Policy Override Comment, 9=Policies Overridden
     [string]$ChangeFormat = "{0,-25} {1}`n", #0=Change Type, 1=Server Item Path
     [string]$WorkItemFormat = "{0,-8} {1}`n", #0=Work Item Id, 1=Work Item Title
     [string]$CheckInNotesFormat = "  {0}: {1}`n", #0=Name, 1=Value
